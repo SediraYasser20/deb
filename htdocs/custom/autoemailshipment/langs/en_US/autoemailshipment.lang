@@ -1,0 +1,18 @@
+# Dolibarr language file - Module AutoEmailShipment (en_US)
+# Copyright (C) 2023 YOUR_NAME_OR_COMPANY YOUR_EMAIL
+#
+# Begin: Module description
+Module500000Name=Auto Email Shipment on Validation
+Module500000Desc=Automatically sends an email with the delivery slip when a shipment is validated.
+# End: Module description
+
+# Begin: Email content
+EmailSubjectDeliveryValidated=Delivery validated: %s
+EmailBodyDeliveryValidated=Your delivery %s has been validated.
+EmailSentForShipment=Email sent for shipment %s
+EmailSentTo=Email sent to: %s
+# End: Email content
+
+# Other
+PermissionToRead=Read autoemailshipment data
+PermissionToWrite=Create/Update autoemailshipment data

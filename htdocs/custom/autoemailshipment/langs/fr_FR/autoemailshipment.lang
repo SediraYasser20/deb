@@ -1,0 +1,18 @@
+# Dolibarr language file - Module AutoEmailShipment (fr_FR)
+# Copyright (C) 2023 VOTRE_NOM_OU_ENTREPRISE VOTRE_EMAIL
+#
+# Begin: Module description
+Module500000Name=Envoi Email Auto Expédition Validée
+Module500000Desc=Envoie automatiquement un email avec le bon de livraison lorsqu'une expédition est validée.
+# End: Module description
+
+# Begin: Email content
+EmailSubjectDeliveryValidated=Livraison validée : %s
+EmailBodyDeliveryValidated=Votre livraison %s a été validée.
+EmailSentForShipment=Email envoyé pour l'expédition %s
+EmailSentTo=Email envoyé à : %s
+# End: Email content
+
+# Other
+PermissionToRead=Lire les données autoemailshipment
+PermissionToWrite=Créer/Modifier les données autoemailshipment
