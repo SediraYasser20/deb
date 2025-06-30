@@ -1,0 +1,42 @@
+# Translation file
+
+#
+# Generic
+#
+
+# Module label 'ModuleAutoshipmentName'
+ModuleAutoshipmentName = Autoshipment
+# Module description 'ModuleAutoshipmentDesc'
+ModuleAutoshipmentDesc = Autoshipment description
+
+#
+# Admin page
+#
+AutoshipmentSetup = Autoshipment setup
+Settings = Settings
+AutoshipmentSetupPage = Autoshipment setup page
+NewSection=New section
+AUTOSHIPMENT_MYPARAM1 = My param 1
+AUTOSHIPMENT_MYPARAM1Tooltip = My param 1 tooltip
+AUTOSHIPMENT_MYPARAM2=My param 2
+AUTOSHIPMENT_MYPARAM2Tooltip=My param 2 tooltip
+
+
+#
+# About page
+#
+About = About
+AutoshipmentAbout = About Autoshipment
+AutoshipmentAboutPage = Autoshipment about page
+
+#
+# Sample page
+#
+AutoshipmentArea = Home Autoshipment
+MyPageName = My page name
+
+#
+# Sample widget
+#
+MyWidget = My widget
+MyWidgetDescription = My widget description
