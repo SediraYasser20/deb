@@ -310,67 +310,207 @@ if ($action == 'confirm_reopen' && $user->admin) {
 							$stockmove->setOrigin($object->element, $object->id);
 							$stockmove->context['mrp_role'] = 'toconsume';
 
-							$batch_number_to_consume = GETPOST('batch-'.$line->id.'-'.$i);
+								$batch_input_raw = GETPOST('batch-'.$line->id.'-'.$i);
 
-							// BEGIN: Serial number validation
-							if (!$error && $tmpproduct->status_batch && !empty($batch_number_to_consume)) { // Check !$error first
-								$sql_check_serial = "SELECT COUNT(*) as nb FROM ".MAIN_DB_PREFIX."product_lot";
-								$sql_check_serial .= " WHERE fk_product = ".((int) $line->fk_product);
-								$sql_check_serial .= " AND batch = '".$db->escape($batch_number_to_consume)."'";
-								$sql_check_serial .= " AND entity IN (".getEntity('productlot').")";
+								if ($tmpproduct->status_batch) { // Product requires serial numbers
+									if ($qtytoprocess > 1) {
+										// Multiple units of a serialized product
+										$serial_numbers_raw = trim((string)$batch_input_raw);
+										if (empty($serial_numbers_raw)) {
+											$langs->load("errors");
+											setEventMessages($langs->trans("ErrorSerialNumbersRequired", $tmpproduct->ref), null, 'errors');
+											$error++;
+										} else {
+											$serial_numbers = array_map('trim', explode(',', $serial_numbers_raw));
+											$unique_serial_numbers = array_unique($serial_numbers);
 
-								$resql_check_serial = $db->query($sql_check_serial);
-								if ($resql_check_serial) {
-									$obj_check_serial = $db->fetch_object($resql_check_serial);
-									if ($obj_check_serial->nb == 0) {
+											if (count($serial_numbers) != $qtytoprocess) {
+												$langs->load("errors");
+												setEventMessages($langs->trans("ErrorIncorrectNumberOfSerialNumbers", count($serial_numbers), $qtytoprocess, $tmpproduct->ref), null, 'errors');
+												$error++;
+											} elseif (count($unique_serial_numbers) != count($serial_numbers)) {
+												$langs->load("errors");
+												setEventMessages($langs->trans("ErrorDuplicateSerialNumbersFound", $tmpproduct->ref), null, 'errors');
+												$error++;
+											} else {
+												// All checks passed for number and uniqueness, now validate each serial
+												foreach ($unique_serial_numbers as $current_serial) {
+													if ($error) break; // Stop if an error occurred in a previous iteration
+
+													// Check if serial exists for the product AND is in the specified warehouse with stock > 0
+													$sql_check_serial_in_warehouse = "SELECT pb.qty";
+													$sql_check_serial_in_warehouse .= " FROM ".MAIN_DB_PREFIX."product_lot as pl";
+													$sql_check_serial_in_warehouse .= " INNER JOIN ".MAIN_DB_PREFIX."product_stock as ps ON ps.fk_product = pl.fk_product";
+													$sql_check_serial_in_warehouse .= " INNER JOIN ".MAIN_DB_PREFIX."product_batch as pb ON pb.fk_product_stock = ps.rowid";
+													$sql_check_serial_in_warehouse .= " WHERE pl.fk_product = ".((int) $line->fk_product);
+													$sql_check_serial_in_warehouse .= " AND pl.batch = '".$db->escape($current_serial)."'";
+													$sql_check_serial_in_warehouse .= " AND ps.fk_entrepot = ".((int) GETPOST('idwarehouse-'.$line->id.'-'.$i));
+													$sql_check_serial_in_warehouse .= " AND pb.batch = '".$db->escape($current_serial)."'";  // Ensure we are checking the same batch in product_batch table
+													$sql_check_serial_in_warehouse .= " AND pb.qty > 0";
+													$sql_check_serial_in_warehouse .= " AND pl.entity IN (".getEntity('productlot').")";
+
+													$resql_check_serial_in_warehouse = $db->query($sql_check_serial_in_warehouse);
+													if ($resql_check_serial_in_warehouse) {
+														$obj_check_serial = $db->fetch_object($resql_check_serial_in_warehouse);
+														if (!$obj_check_serial || $obj_check_serial->qty <= 0) { // Check if object exists and qty > 0
+															$langs->load("errors");
+															$selected_warehouse_obj = new Entrepot($db);
+															$selected_warehouse_obj->fetch(GETPOST('idwarehouse-'.$line->id.'-'.$i));
+															setEventMessages($langs->trans("ErrorSerialNumberNotInWarehouseOrNoStock", $current_serial, $tmpproduct->ref, $selected_warehouse_obj->label), null, 'errors');
+															$error++;
+														}
+														// If num_rows > 0, serial exists in warehouse with stock, proceed
+													} else {
+														// SQL error
+														dol_print_error($db);
+														setEventMessages($db->lasterror(), null, 'errors');
+														$error++;
+													}
+
+													if (!$error) {
+														// Process stock movement for 1 unit with this serial
+														$idstockmove_unit = 0;
+														if ($qtytoprocess >= 0) { // Should always be positive for consumption here
+															$idstockmove_unit = $stockmove->livraison($user, $line->fk_product, GETPOST('idwarehouse-'.$line->id.'-'.$i), 1, 0, $labelmovement, dol_now(), '', '', $current_serial, $id_product_batch, $codemovement);
+														} else {
+															// This case (negative qtytoprocess) should ideally be handled by prior validation or be for returns
+															$idstockmove_unit = $stockmove->reception($user, $line->fk_product, GETPOST('idwarehouse-'.$line->id.'-'.$i), 1, 0, $labelmovement, dol_now(), '', '', $current_serial, $id_product_batch, $codemovement);
+														}
+														if ($idstockmove_unit < 0) {
+															$error++;
+															setEventMessages($stockmove->error, $stockmove->errors, 'errors');
+															// No break here, let it try to record other serials if possible, or rely on db->rollback
+														} else {
+															// Record consumption for 1 unit
+															$moline_unit = new MoLine($db);
+															$moline_unit->fk_mo = $object->id;
+															$moline_unit->position = $pos;
+															$moline_unit->fk_product = $line->fk_product;
+															$moline_unit->fk_warehouse = GETPOSTINT('idwarehouse-'.$line->id.'-'.$i);
+															$moline_unit->qty = 1;
+															$moline_unit->batch = $current_serial;
+															$moline_unit->role = 'consumed';
+															$moline_unit->fk_mrp_production = $line->id;
+															$moline_unit->fk_stock_movement = $idstockmove_unit == 0 ? null : $idstockmove_unit;
+															$moline_unit->fk_user_creat = $user->id;
+
+															$resultmoline_unit = $moline_unit->create($user);
+															if ($resultmoline_unit <= 0) {
+																$error++;
+																setEventMessages($moline_unit->error, $moline_unit->errors, 'errors');
+															}
+															$pos++;
+														}
+													}
+												}
+											}
+										}
+									} else { // Single unit of a serialized product ($qtytoprocess == 1)
+										$batch_number_to_consume = trim((string)$batch_input_raw);
+										if (empty($batch_number_to_consume)) {
 										$langs->load("errors");
-										setEventMessages($langs->trans("ErrorSerialNumberNotFoundForProduct", $batch_number_to_consume, $tmpproduct->ref), null, 'errors');
+											setEventMessages($langs->trans("ErrorSerialNumberRequiredForProduct", $tmpproduct->ref), null, 'errors');
 										$error++;
-									}
-								} else {
-									// SQL error
-									dol_print_error($db);
-									setEventMessages($db->lasterror(), null, 'errors'); // Also show SQL error to user/logs
-									$error++;
-								}
-							}
-							// END: Serial number validation
+										} else {
+											// Standard serial validation for single unit, now including warehouse check
+											$sql_check_serial_in_warehouse = "SELECT pb.qty";
+											$sql_check_serial_in_warehouse .= " FROM ".MAIN_DB_PREFIX."product_lot as pl";
+											$sql_check_serial_in_warehouse .= " INNER JOIN ".MAIN_DB_PREFIX."product_stock as ps ON ps.fk_product = pl.fk_product";
+											$sql_check_serial_in_warehouse .= " INNER JOIN ".MAIN_DB_PREFIX."product_batch as pb ON pb.fk_product_stock = ps.rowid";
+											$sql_check_serial_in_warehouse .= " WHERE pl.fk_product = ".((int) $line->fk_product);
+											$sql_check_serial_in_warehouse .= " AND pl.batch = '".$db->escape($batch_number_to_consume)."'";
+											$sql_check_serial_in_warehouse .= " AND ps.fk_entrepot = ".((int) GETPOST('idwarehouse-'.$line->id.'-'.$i));
+											$sql_check_serial_in_warehouse .= " AND pb.batch = '".$db->escape($batch_number_to_consume)."'"; // Ensure we are checking the same batch in product_batch table
+											$sql_check_serial_in_warehouse .= " AND pb.qty > 0";
+											$sql_check_serial_in_warehouse .= " AND pl.entity IN (".getEntity('productlot').")";
 
-							if (!$error) { // Proceed only if no error so far (including new serial check)
+											$resql_check_serial_in_warehouse = $db->query($sql_check_serial_in_warehouse);
+											if ($resql_check_serial_in_warehouse) {
+												$obj_check_serial = $db->fetch_object($resql_check_serial_in_warehouse);
+												if (!$obj_check_serial || $obj_check_serial->qty <= 0) { // Check if object exists and qty > 0
+													$langs->load("errors");
+													$selected_warehouse_obj = new Entrepot($db);
+													$selected_warehouse_obj->fetch(GETPOST('idwarehouse-'.$line->id.'-'.$i));
+													setEventMessages($langs->trans("ErrorSerialNumberNotInWarehouseOrNoStock", $batch_number_to_consume, $tmpproduct->ref, $selected_warehouse_obj->label), null, 'errors');
+													$error++;
+												}
+												// If num_rows > 0, serial exists in warehouse with stock, proceed
+											} else {
+												// SQL error
+												dol_print_error($db);
+												setEventMessages($db->lasterror(), null, 'errors');
+												$error++;
+											}
+
+											if (!$error) {
+												// Process stock movement for 1 unit
+												if ($qtytoprocess >= 0) {
+													$idstockmove = $stockmove->livraison($user, $line->fk_product, GETPOST('idwarehouse-'.$line->id.'-'.$i), 1, 0, $labelmovement, dol_now(), '', '', $batch_number_to_consume, $id_product_batch, $codemovement);
+												} else {
+													$idstockmove = $stockmove->reception($user, $line->fk_product, GETPOST('idwarehouse-'.$line->id.'-'.$i), 1, 0, $labelmovement, dol_now(), '', '', $batch_number_to_consume, $id_product_batch, $codemovement);
+												}
+												if ($idstockmove < 0) {
+													$error++;
+													setEventMessages($stockmove->error, $stockmove->errors, 'errors');
+												} else {
+													// Record consumption for 1 unit
+													$moline = new MoLine($db);
+													$moline->fk_mo = $object->id;
+													$moline->position = $pos;
+													$moline->fk_product = $line->fk_product;
+													$moline->fk_warehouse = GETPOSTINT('idwarehouse-'.$line->id.'-'.$i);
+													$moline->qty = 1; // qty is 1
+													$moline->batch = $batch_number_to_consume;
+													$moline->role = 'consumed';
+													$moline->fk_mrp_production = $line->id;
+													$moline->fk_stock_movement = $idstockmove == 0 ? null : $idstockmove;
+													$moline->fk_user_creat = $user->id;
+
+													$resultmoline = $moline->create($user);
+													if ($resultmoline <= 0) {
+														$error++;
+														setEventMessages($moline->error, $moline->errors, 'errors');
+													}
+													$pos++;
+												}
+											}
+									}
+								}
+								} else { // Product does not require serial numbers (original logic for non-serialized)
+									// No batch number to validate, proceed directly to stock movement for the full quantity
 								if ($qtytoprocess >= 0) {
-									$idstockmove = $stockmove->livraison($user, $line->fk_product, GETPOST('idwarehouse-'.$line->id.'-'.$i), $qtytoprocess, 0, $labelmovement, dol_now(), '', '', $batch_number_to_consume, $id_product_batch, $codemovement);
+										$idstockmove = $stockmove->livraison($user, $line->fk_product, GETPOST('idwarehouse-'.$line->id.'-'.$i), $qtytoprocess, 0, $labelmovement, dol_now(), '', '', '', $id_product_batch, $codemovement);
 								} else {
-									$idstockmove = $stockmove->reception($user, $line->fk_product, GETPOST('idwarehouse-'.$line->id.'-'.$i), $qtytoprocess * -1, 0, $labelmovement, dol_now(), '', '', $batch_number_to_consume, $id_product_batch, $codemovement);
+										$idstockmove = $stockmove->reception($user, $line->fk_product, GETPOST('idwarehouse-'.$line->id.'-'.$i), $qtytoprocess * -1, 0, $labelmovement, dol_now(), '', '', '', $id_product_batch, $codemovement);
 								}
 								if ($idstockmove < 0) {
 									$error++;
 									setEventMessages($stockmove->error, $stockmove->errors, 'errors');
+									} else {
+										// Record consumption for full quantity
+										$moline = new MoLine($db);
+										$moline->fk_mo = $object->id;
+										$moline->position = $pos;
+										$moline->fk_product = $line->fk_product;
+										$moline->fk_warehouse = GETPOSTINT('idwarehouse-'.$line->id.'-'.$i);
+										$moline->qty = $qtytoprocess;
+										// $moline->batch is not set as it's not a batch product
+										$moline->role = 'consumed';
+										$moline->fk_mrp_production = $line->id;
+										$moline->fk_stock_movement = $idstockmove == 0 ? null : $idstockmove;
+										$moline->fk_user_creat = $user->id;
+
+										$resultmoline = $moline->create($user);
+										if ($resultmoline <= 0) {
+											$error++;
+											setEventMessages($moline->error, $moline->errors, 'errors');
+										}
+										$pos++;
 								}
 							}
 						}
-
-						if (!$error) {
-							// Record consumption
-							$moline = new MoLine($db);
-							$moline->fk_mo = $object->id;
-							$moline->position = $pos;
-							$moline->fk_product = $line->fk_product;
-							$moline->fk_warehouse = GETPOSTINT('idwarehouse-'.$line->id.'-'.$i);
-							$moline->qty = $qtytoprocess;
-							$moline->batch = GETPOST('batch-'.$line->id.'-'.$i);
-							$moline->role = 'consumed';
-							$moline->fk_mrp_production = $line->id;
-							$moline->fk_stock_movement = $idstockmove == 0 ? null : $idstockmove;
-							$moline->fk_user_creat = $user->id;
-
-							$resultmoline = $moline->create($user);
-							if ($resultmoline <= 0) {
-								$error++;
-								setEventMessages($moline->error, $moline->errors, 'errors');
-							}
-
-							$pos++;
-						}
+							// No further processing for this $qtytoprocess entry if error occurred above for serialized items
+							// For non-serialized, the original single $moline creation attempt happens inside the else block above.
 					}
 
 					$i++;
