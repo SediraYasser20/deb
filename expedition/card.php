@@ -411,6 +411,37 @@ if ($action == 'add' && $permissiontoadd) {
                                      $error++; break; // Stop processing this line's serials
                                 }
 
+                                // NEW VALIDATION FOR PRODUCT 483 (Exact match from description)
+                                $special_prod483_rule_applied_and_passed = false;
+                                if ($effective_fk_product_for_line == 483) {
+                                    $expected_serial_from_desc = '';
+                                    // Regex to capture "OFxxxx-xxxxxx" from "OFxxxx-xxxxxx (Fabrication)"
+                                    // The description on the order line is in $current_order_line->description
+                                    if (preg_match('/^(OF\d+-\d+)\s*\(Fabrication\)/i', trim($current_order_line->description), $desc_matches)) {
+                                        $expected_serial_from_desc = trim($desc_matches[1]);
+
+                                        if ($serial_number !== $expected_serial_from_desc) {
+                                            setEventMessages($langs->trans("ErrorSerialForProd483MustMatchDesc", $serial_number, $expected_serial_from_desc, $product_ref_for_error_msg), null, 'errors');
+                                            $error++;
+                                            // Break from the foreach loop over serials for this line.
+                                            // The outer loop for lines will check $error and break if necessary.
+                                            break;
+                                        } else {
+                                            $special_prod483_rule_applied_and_passed = true; // Exact match rule passed
+                                        }
+                                    }
+                                    // If Product 483's description doesn't match "OF... (Fabrication)",
+                                    // this specific rule is skipped. Standard serial validation (including other MO checks if applicable) will proceed.
+                                }
+                                // END OF NEW VALIDATION FOR PRODUCT 483
+
+                                // If the new validation for Product 483 set an error, stop processing further serials for this line.
+                                if ($error) {
+                                    // This break is for the `foreach ($entered_serials as ...)` loop.
+                                    // The outer `for ($i = 0; $i < $num; $i++)` loop has its own `if ($error) break;`
+                                    break;
+                                }
+
                                 // Fetch product_batch rowid using serial number, product_id, and warehouse_id
                                 $productbatch_entry = new Productbatch($db);
                                 // We need to find the llx_product_batch.rowid
@@ -437,7 +468,9 @@ if ($action == 'add' && $permissiontoadd) {
                                         $product_batch_used_for_serial_check[] = $serial_key;
 
                                         // MO Validation for Product 31 (remains important)
-                                        if ($is_mo_line && $effective_fk_product_for_line == 483) {
+                                        // This should only run if the new specific rule for Product 483 ($special_prod483_rule_applied_and_passed) was not applied (or did not pass, though passing means $error would not be set).
+                                        // The primary condition is that the new rule didn't definitively say "this serial is correct for this specific 'OF...' description".
+                                        if (!$special_prod483_rule_applied_and_passed && $is_mo_line && $effective_fk_product_for_line == 483) {
                                             $mo_ref_from_db = '';
                                             if (!empty($current_order_line->fk_mrp_mo)) {
                                                 // ... (fetch MO ref from fk_mrp_mo - existing logic)
@@ -2000,7 +2033,8 @@ if ($origin == 'commande' && isset($object->id) && $object->id > 0 && !empty($ob
 							}
 							print '</div>'; //end lot_entry_row
 							print '</div>'; //end lot_entries_line_X
-							print '<button type="button" class="buttonaddlot" data-line-index="'.$indiceAsked.'">'.$langs->trans("AddAnotherLot").'</button>';
+							// Use $line->qty (original order qty) for data-ordered-qty
+							print '<button type="button" class="buttonaddlot" data-line-index="'.$indiceAsked.'" data-ordered-qty="'.round($line->qty, 0).'">'.$langs->trans("AddAnotherLot").'</button>';
 							print '</td>';
 							if (getDolGlobalString('SHIPPING_DISPLAY_STOCK_ENTRY_DATE') && !isModEnabled('stock')) {
 								print '<td></td>';
@@ -3772,6 +3806,19 @@ $(document).ready(function() {
 
     $('body').on('click', '.buttonaddlot', function() {
         var lineIndex = $(this).data('line-index');
+        var orderedQty = parseInt($(this).data('ordered-qty'), 10);
+
+        // Count current number of lot entry rows for this specific line
+        var currentLotRows = $('#lot_entries_line_' + lineIndex + ' .lot_entry_row').length;
+
+        if (currentLotRows >= orderedQty) {
+            // Optionally, provide some feedback to the user, e.g., a temporary message or disable the button
+            // For now, just prevent adding more if the limit is reached.
+            // alert("<?php echo dol_escape_js($langs->transnoentitiesnoconv("CannotAddMoreLotsThanOrdered")); ?>");
+            $(this).prop('disabled', true); // Disable the button if limit reached
+            return;
+        }
+
         if (typeof lotEntryIndex[lineIndex] === 'undefined') {
             lotEntryIndex[lineIndex] = 1; // Start with 1 as 0 is the initial entry
         }
@@ -3782,16 +3829,20 @@ $(document).ready(function() {
         lotEntryHtml += '<?php echo $langs->trans("Qty"); ?>: <input type="text" name="lots[' + lineIndex + '][' + newIndex + '][qty]" size="4" class="lot_qty_input" data-line-index="' + lineIndex + '"> ';
         <?php if (isModEnabled('stock')) { ?>
             lotEntryHtml += '<?php echo $langs->trans("FromWarehouse"); ?>: ';
-            // Need to generate the warehouse select HTML. This is tricky as $formproduct is PHP.
-            // A simpler way for now might be to clone the first warehouse select if available, or provide a basic select.
-            // For robust solution, an AJAX call to get warehouse select HTML might be needed, or embed a template.
-            // Cloning the first one:
             var $firstWarehouseSelect = $('#lot_entries_line_' + lineIndex + ' .lot_entry_row:first .lot_warehouse_input');
             if ($firstWarehouseSelect.length) {
                 var clonedSelect = $firstWarehouseSelect.clone().attr('name', 'lots[' + lineIndex + '][' + newIndex + '][warehouse]').val('');
+                // Ensure unique ID for the new select if it has one, to prevent issues with select2
+                var originalId = clonedSelect.attr('id');
+                if (originalId) {
+                    clonedSelect.attr('id', originalId + '_' + newIndex);
+                }
+                // Remove previous select2 bindings if any before appending
+                if (clonedSelect.hasClass('select2-hidden-accessible')) {
+                    clonedSelect.select2('destroy');
+                }
                 lotEntryHtml += $('<div>').append(clonedSelect).html();
             } else {
-                 // Fallback if no warehouse select is found to clone (e.g. stock module disabled for first item)
                 lotEntryHtml += '<input type="text" name="lots[' + lineIndex + '][' + newIndex + '][warehouse_name_fallback]" placeholder="<?php echo $langs->trans("Warehouse"); ?> (ID)">';
             }
         <?php } ?>
@@ -3800,16 +3851,29 @@ $(document).ready(function() {
 
         $('#lot_entries_line_' + lineIndex).append(lotEntryHtml);
         // Re-apply select2 if it was used and cloned
-        $('#lot_entries_line_' + lineIndex + ' .lot_entry_row:last .lot_warehouse_input').select2();
+        // Ensure to target the newly added select specifically if its ID was changed
+        var newSelect = $('#lot_entries_line_' + lineIndex + ' .lot_entry_row:last .lot_warehouse_input');
+        if (newSelect.length && typeof $.fn.select2 === 'function') {
+           newSelect.select2();
+        }
+
+        // After adding, check again if the button should be disabled
+        if (($('#lot_entries_line_' + lineIndex + ' .lot_entry_row').length) >= orderedQty) {
+            $(this).prop('disabled', true);
+        }
 
     });
 
     // JavaScript for "Remove Lot" button
     $('body').on('click', '.buttonremovelot', function() {
-        $(this).closest('.lot_entry_row').remove();
-        // After removing, recalculate total lot quantity for the line
-        var lineIndex = $(this).closest('.lot_entry_row').find('.lot_qty_input').data('line-index');
-         if (typeof lineIndex !== 'undefined') { // Check if lineIndex was found (it might not be if all inputs are removed)
+        var $rowToRemove = $(this).closest('.lot_entry_row');
+        // Attempt to get lineIndex from the row being removed, BEFORE it's removed.
+        var lineIndex = $rowToRemove.find('.lot_qty_input').data('line-index');
+
+        $rowToRemove.remove();
+
+        if (typeof lineIndex !== 'undefined') {
+            // Recalculate total lot quantity for the line
             var totalLotQty = 0;
             $('#lot_entries_line_' + lineIndex + ' .lot_qty_input').each(function() {
                 var qty = parseFloat($(this).val());
@@ -3818,6 +3882,19 @@ $(document).ready(function() {
                 }
             });
             $('#qtyl' + lineIndex).val(totalLotQty.toFixed(<?php echo empty($conf->global->MAIN_MAX_DECIMALS_TOT) ? 2 : $conf->global->MAIN_MAX_DECIMALS_TOT; ?>));
+
+            // Re-check the "AddAnotherLot" button state for this line
+            var $addLotButton = $('.buttonaddlot[data-line-index="' + lineIndex + '"]');
+            if ($addLotButton.length) {
+                var orderedQty = parseInt($addLotButton.data('ordered-qty'), 10);
+                var currentLotRows = $('#lot_entries_line_' + lineIndex + ' .lot_entry_row').length;
+                if (currentLotRows < orderedQty) {
+                    $addLotButton.prop('disabled', false);
+                }
+            }
+        } else {
+            // Fallback or error logging if lineIndex couldn't be determined
+            console.warn("Could not determine lineIndex for recalculation after lot removal.");
         }
     });
 
@@ -3834,6 +3911,84 @@ $(document).ready(function() {
         $('#qtyl' + lineIndex).val(totalLotQty.toFixed(<?php echo empty($conf->global->MAIN_MAX_DECIMALS_TOT) ? 2 : $conf->global->MAIN_MAX_DECIMALS_TOT; ?>));
     });
 
+    // JavaScript to validate quantity on lot input
+    // Initial state check for "AddAnotherLot" buttons on document ready
+    $('.buttonaddlot').each(function() {
+        var $button = $(this);
+        var lineIndex = $button.data('line-index');
+        var orderedQty = parseInt($button.data('ordered-qty'), 10);
+
+        if (isNaN(orderedQty)) {
+            console.warn("Initial state check: Ordered quantity is not a number for line " + lineIndex + ".");
+            return; // Skip this button
+        }
+
+        var currentLotRows = $('#lot_entries_line_' + lineIndex + ' .lot_entry_row').length;
+
+        if (currentLotRows >= orderedQty) {
+            $button.prop('disabled', true);
+        } else {
+            $button.prop('disabled', false); // Ensure it's enabled if below limit
+        }
+    });
+
+    $('body').on('input', '.lot_qty_input', function() {
+        var $currentInput = $(this);
+        var lineIndex = $currentInput.data('line-index');
+        var currentVal = parseFloat($currentInput.val());
+
+        if (isNaN(currentVal) || currentVal < 0) {
+            if (isNaN(currentVal) && $currentInput.val().trim() !== '') {
+                 $currentInput.val(0);
+                 currentVal = 0;
+            } else if (currentVal < 0) {
+                 $currentInput.val(0);
+                 currentVal = 0;
+            }
+            // If currentVal is still NaN (e.g. input was empty), let it be, it will be treated as 0 by sum.
+        }
+
+        var $addLotButton = $('.buttonaddlot[data-line-index="' + lineIndex + '"]');
+        if (!$addLotButton.length) {
+            console.warn("Could not find AddAnotherLot button for line " + lineIndex + " to get ordered quantity.");
+            return;
+        }
+        var orderedQty = parseInt($addLotButton.data('ordered-qty'), 10);
+
+        if (isNaN(orderedQty)) {
+            console.warn("Ordered quantity is not a number for line " + lineIndex + ".");
+            return;
+        }
+
+        var sumOfOtherLots = 0;
+        $('#lot_entries_line_' + lineIndex + ' .lot_qty_input').not($currentInput).each(function() {
+            var otherVal = parseFloat($(this).val());
+            if (!isNaN(otherVal) && otherVal > 0) {
+                sumOfOtherLots += otherVal;
+            }
+        });
+
+        currentVal = parseFloat($currentInput.val()); // Re-read currentVal in case it was changed (e.g. to 0)
+        if(isNaN(currentVal)) currentVal = 0;
+
+
+        if (currentVal + sumOfOtherLots > orderedQty) {
+            var maxAllowedForCurrent = orderedQty - sumOfOtherLots;
+            if (maxAllowedForCurrent < 0) maxAllowedForCurrent = 0;
+
+            $currentInput.val(Math.floor(maxAllowedForCurrent));
+        }
+
+        // Update the main line quantity display (this part is duplicated from the remove handler, good to have it here too)
+        var totalLotQty = 0;
+        $('#lot_entries_line_' + lineIndex + ' .lot_qty_input').each(function() {
+            var qty = parseFloat($(this).val());
+            if (!isNaN(qty) && qty > 0) { // Only sum positive quantities for the total display
+                totalLotQty += qty;
+            }
+        });
+        $('#qtyl' + lineIndex).val(totalLotQty.toFixed(<?php echo empty($conf->global->MAIN_MAX_DECIMALS_TOT) ? 2 : $conf->global->MAIN_MAX_DECIMALS_TOT; ?>));
+    });
 
 });
 </script>
