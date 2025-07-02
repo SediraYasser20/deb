@@ -420,6 +420,51 @@ if (empty($reshook)) {
 						$entrepot_id = 0;
 					}
 
+					// Custom validation: Qty received must not surpass Qty ordered
+					$current_qty_for_line = price2num(GETPOST($qty), 'MS');
+					$source_order_line_id = GETPOSTINT($idl); // This is llx_commande_fournisseurdet.rowid
+
+					if ($source_order_line_id > 0 && !$error) { // Only validate if linked to a specific order line AND no prior error
+						$original_ordered_qty = 0;
+						$product_ref_for_error = "N/A";
+
+						// Find the original ordered quantity from $objectsrc->lines
+						foreach ($objectsrc->lines as $order_line_obj) {
+							if ($order_line_obj->id == $source_order_line_id) {
+								$original_ordered_qty = $order_line_obj->qty;
+								if ($order_line_obj->fk_product > 0) {
+									$tmpProd = new Product($db);
+									$tmpProd->fetch($order_line_obj->fk_product);
+									$product_ref_for_error = $tmpProd->ref;
+								} elseif (!empty($order_line_obj->label)) {
+									$product_ref_for_error = $order_line_obj->label;
+								} elseif (!empty($order_line_obj->description)) {
+									$product_ref_for_error = dol_trunc($order_line_obj->description, 20);
+								}
+								break;
+							}
+						}
+
+						// also check if ordered is 0 but trying to receive >0
+						if ($original_ordered_qty > 0 || ($original_ordered_qty == 0 && $current_qty_for_line > 0)) {
+							$previously_received_qty_for_order_line = 0;
+							if (isset($objectsrc->receptions[$source_order_line_id])) {
+								$previously_received_qty_for_order_line = $objectsrc->receptions[$source_order_line_id];
+							}
+
+							if (($previously_received_qty_for_order_line + $current_qty_for_line) > $original_ordered_qty) {
+								$langs->load("errors");
+								$errmsg = $langs->trans("QtyReceivedCannotExceedQtyOrderedForProduct", $product_ref_for_error);
+								$errmsg .= ' ('.$langs->trans("Ordered").": ".price($original_ordered_qty).", ";
+								$errmsg .= $langs->trans("PreviouslyReceived").": ".price($previously_received_qty_for_order_line).", ";
+								$errmsg .= $langs->trans("CurrentlyReceiving").": ".price($current_qty_for_line).")";
+								setEventMessages($errmsg, null, 'errors');
+								$error++;
+							}
+						}
+					} // End if ($source_order_line_id > 0 && !$error)
+					// End custom validation
+
 					$eatby = GETPOST($eatby, 'alpha');
 					$sellby = GETPOST($sellby, 'alpha');
 					$eatbydate = str_replace('/', '-', $eatby);
@@ -694,8 +739,63 @@ if (empty($reshook)) {
 
 					$line->id = $line_id;
 					$line->fk_entrepot = GETPOSTINT($stockLocation);
-					$line->qty = GETPOSTINT($qty);
+					$new_qty_for_line = GETPOSTINT($qty); // Store new qty temporarily
 					$line->comment = GETPOST($comment, 'alpha');
+
+					// Custom validation for updateline
+					if (!$error) { // Only proceed if no prior errors in this action
+						$source_order_line_id_from_reception = $line->fk_elementdet; // Assuming fk_elementdet links to order line
+
+						if ($source_order_line_id_from_reception > 0) {
+							$original_ordered_qty_update = 0;
+							$product_ref_for_error_update = "N/A";
+
+							$sourceOrderLineUpdate = new CommandeFournisseurLigne($db);
+							$sourceOrderLineUpdate->fetch($source_order_line_id_from_reception);
+							$original_ordered_qty_update = $sourceOrderLineUpdate->qty;
+
+							if ($sourceOrderLineUpdate->fk_product > 0) {
+								$tmpProdUpdate = new Product($db);
+								$tmpProdUpdate->fetch($sourceOrderLineUpdate->fk_product);
+								$product_ref_for_error_update = $tmpProdUpdate->ref;
+							} elseif (!empty($sourceOrderLineUpdate->label)) {
+								$product_ref_for_error_update = $sourceOrderLineUpdate->label;
+							} elseif (!empty($sourceOrderLineUpdate->description)) {
+								$product_ref_for_error_update = dol_trunc($sourceOrderLineUpdate->description, 20);
+							}
+
+							$previously_received_qty_excluding_current = 0;
+							$sql_already_received_update = "SELECT SUM(rdb.qty) as total_previously_received";
+							$sql_already_received_update .= " FROM ".MAIN_DB_PREFIX."receptiondet_batch as rdb";
+							$sql_already_received_update .= " WHERE rdb.fk_elementdet = ".$source_order_line_id_from_reception;
+							$sql_already_received_update .= " AND rdb.rowid != ".$line_id;
+
+							$resql_already_received_update = $db->query($sql_already_received_update);
+							if ($resql_already_received_update) {
+								$obj_already_received_update = $db->fetch_object($resql_already_received_update);
+								if ($obj_already_received_update) {
+									$previously_received_qty_excluding_current = (float) $obj_already_received_update->total_previously_received;
+								}
+								$db->free($resql_already_received_update);
+							} else {
+								dol_print_error($db);
+								$error++;
+							}
+
+							if (!$error && ($previously_received_qty_excluding_current + $new_qty_for_line) > $original_ordered_qty_update) {
+								$langs->load("errors");
+								$errmsg_update = $langs->trans("QtyReceivedCannotExceedQtyOrderedForProduct", $product_ref_for_error_update);
+								$errmsg_update .= ' ('.$langs->trans("Ordered").": ".price($original_ordered_qty_update).", ";
+								$errmsg_update .= $langs->trans("PreviouslyReceivedOnOtherLines").": ".price($previously_received_qty_excluding_current).", ";
+								$errmsg_update .= $langs->trans("CurrentlyReceivingOnThisLine").": ".price($new_qty_for_line).")";
+								setEventMessages($errmsg_update, null, 'errors');
+								$error++;
+							}
+						} // End if ($source_order_line_id_from_reception > 0)
+					} // End if (!$error) for custom validation block
+					// End custom validation for updateline
+
+					$line->qty = $new_qty_for_line; // Assign potentially validated/modified qty
 
 					if (isModEnabled('productbatch')) {
 						$batch = "batch".$line_id;
@@ -2128,9 +2228,11 @@ if ($action == 'create') {
 		$arrayofpurchaselinealreadyoutput[$lines[$i]->fk_commandefourndet] = $lines[$i]->fk_commandefourndet;
 
 		// Display lines extrafields
-		$extralabelslines = $extrafields->attributes[$lines[$i]->table_element];
-		if (!empty($extralabelslines) && is_array($extralabelslines) && count($extralabelslines) > 0) {
-			$colspan = 8;
+		// Guard against undefined table_element or missing attributes for it
+		if (isset($lines[$i]->table_element) && isset($extrafields->attributes[$lines[$i]->table_element])) {
+			$extralabelslines = $extrafields->attributes[$lines[$i]->table_element];
+			if (!empty($extralabelslines) && is_array($extralabelslines) && count($extralabelslines) > 0) {
+				$colspan = 8;
 			if (isModEnabled('stock')) {
 				$colspan++;
 			}
@@ -2148,7 +2250,8 @@ if ($action == 'create') {
 				print $line->showOptionals($extrafields, 'view', array('colspan' => $colspan), '');
 			}
 		}
-	}
+	} // End if (isset($lines[$i]->table_element) && isset($extrafields->attributes[$lines[$i]->table_element]))
+	} // End for loop
 	print '</tbody>';
 
 	// TODO Show also lines ordered but not delivered

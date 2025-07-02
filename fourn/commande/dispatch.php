@@ -269,7 +269,45 @@ if ($action == 'dispatch' && $permissiontoreceive) {
 			// We ask to move a qty
 			$qtytomove = GETPOSTFLOAT($qty);
 			$puformove = GETPOSTFLOAT($pu);
-			if ($qtytomove != 0) {
+
+			// Quantity validation
+			if ($qtytomove > 0) { // Only validate if we are trying to receive a positive quantity
+				$lineidfordet = GETPOSTINT($fk_commandefourndet);
+				$orderline = new Orderline($db);
+				$orderline->fetch($lineidfordet);
+				$ordered_qty = $orderline->qty;
+
+				$alreadydispatched_qty = 0;
+				$sql_already_dispatched = "SELECT SUM(qty) as total_dispatched FROM ".MAIN_DB_PREFIX."receptiondet_batch WHERE fk_elementdet = ".$lineidfordet;
+				$resql_already_dispatched = $db->query($sql_already_dispatched);
+				if ($resql_already_dispatched) {
+					$obj_already_dispatched = $db->fetch_object($resql_already_dispatched);
+					if ($obj_already_dispatched) {
+						$alreadydispatched_qty = (float) $obj_already_dispatched->total_dispatched;
+					}
+					$db->free($resql_already_dispatched);
+				} else {
+					dol_print_error($db);
+					$error++;
+				}
+
+				if (($alreadydispatched_qty + $qtytomove) > $ordered_qty) {
+					$langs->load("errors");
+					$product_ref = "";
+					$tmpproduct = new Product($db);
+					$tmpproduct->fetch(GETPOSTINT($prod));
+					if ($tmpproduct->id > 0) $product_ref = $tmpproduct->ref;
+
+					$errmsg = $langs->trans("QtyReceivedCannotExceedQtyOrderedForProduct", $product_ref);
+					$errmsg .= ' ('.$langs->trans("Ordered").": ".price($ordered_qty).", ";
+					$errmsg .= $langs->trans("AlreadyReceived").": ".price($alreadydispatched_qty).", ";
+					$errmsg .= $langs->trans("CurrentlyDispatching").": ".price($qtytomove).")";
+					setEventMessages($errmsg, null, 'errors');
+					$error++;
+				}
+			}
+
+			if ($qtytomove != 0 && !$error) { // Continue only if no error so far
 				if (!(GETPOSTINT($ent) > 0)) {
 					dol_syslog('No dispatch for line '.$key.' as no warehouse was chosen.');
 					$text = $langs->transnoentities('Warehouse').', '.$langs->transnoentities('Line').' '.($numline);
@@ -339,7 +377,48 @@ if ($action == 'dispatch' && $permissiontoreceive) {
 			// We ask to move a qty
 			$qtytomove = GETPOSTFLOAT($qty);
 			$puformove = GETPOSTFLOAT($pu);
-			if ($qtytomove > 0) {
+
+			// Quantity validation
+			if ($qtytomove > 0) { // Only validate if we are trying to receive a positive quantity
+				$lineidfordet_batch = GETPOSTINT($fk_commandefourndet); // Corrected variable name
+				$orderline_batch = new Orderline($db);
+				$orderline_batch->fetch($lineidfordet_batch);
+				$ordered_qty_batch = $orderline_batch->qty;
+
+				$alreadydispatched_qty_batch = 0;
+				$sql_already_dispatched_batch = "SELECT SUM(qty) as total_dispatched FROM ".MAIN_DB_PREFIX."receptiondet_batch WHERE fk_elementdet = ".$lineidfordet_batch;
+				$resql_already_dispatched_batch = $db->query($sql_already_dispatched_batch);
+				if ($resql_already_dispatched_batch) {
+					$obj_already_dispatched_batch = $db->fetch_object($resql_already_dispatched_batch);
+					if ($obj_already_dispatched_batch) {
+						$alreadydispatched_qty_batch = (float) $obj_already_dispatched_batch->total_dispatched;
+					}
+					$db->free($resql_already_dispatched_batch);
+				} else {
+					dol_print_error($db);
+					$error++;
+				}
+
+				$productId = GETPOSTINT($prod); // Moved here to be available for error message
+
+				if (($alreadydispatched_qty_batch + $qtytomove) > $ordered_qty_batch) {
+					$langs->load("errors");
+					$product_ref_batch = "";
+					$tmpproduct_batch = new Product($db);
+					$tmpproduct_batch->fetch($productId);
+					if ($tmpproduct_batch->id > 0) $product_ref_batch = $tmpproduct_batch->ref;
+
+					$errmsg_batch = $langs->trans("QtyReceivedCannotExceedQtyOrderedForProduct", $product_ref_batch);
+					$errmsg_batch .= ' ('.$langs->trans("Ordered").": ".price($ordered_qty_batch).", ";
+					$errmsg_batch .= $langs->trans("AlreadyReceived").": ".price($alreadydispatched_qty_batch).", ";
+					$errmsg_batch .= $langs->trans("CurrentlyDispatching").": ".price($qtytomove).")";
+					setEventMessages($errmsg_batch, null, 'errors');
+					$error++;
+				}
+			}
+
+
+			if ($qtytomove > 0 && !$error) { // Continue only if no error so far
 				$productId = GETPOSTINT($prod);
 
 				if (!(GETPOSTINT($ent) > 0)) {
@@ -365,8 +444,31 @@ if ($action == 'dispatch' && $permissiontoreceive) {
 					$error++;
 				}
 
+				// Serial number validation
+				$serial_to_check = GETPOST($lot, 'alpha');
+				if (!$error && !empty($serial_to_check)) {
+					$sql_check_serial = "SELECT COUNT(*) as count FROM ".MAIN_DB_PREFIX."product_lot";
+					$sql_check_serial .= " WHERE entity = ".$conf->entity;
+					$sql_check_serial .= " AND fk_product = ".$productId;
+					$sql_check_serial .= " AND batch = '".$db->escape($serial_to_check)."'";
+
+					$resql_check_serial = $db->query($sql_check_serial);
+					if ($resql_check_serial) {
+						$obj_check_serial = $db->fetch_object($resql_check_serial);
+						if ($obj_check_serial && $obj_check_serial->count > 0) {
+							$langs->load("errors");
+							setEventMessages($langs->trans("ErrorSerialNumberAlreadyExists", $serial_to_check), null, 'errors');
+							$error++;
+						}
+						$db->free($resql_check_serial);
+					} else {
+						dol_print_error($db);
+						$error++;
+					}
+				}
+
 				if (!$error) {
-					$result = $object->dispatchProduct($user, $productId, $qtytomove, GETPOSTINT($ent), $puformove, GETPOST('comment'), $dDLUO, $dDLC, GETPOST($lot, 'alpha'), GETPOSTINT($fk_commandefourndet), $notrigger);
+					$result = $object->dispatchProduct($user, $productId, $qtytomove, GETPOSTINT($ent), $puformove, GETPOST('comment'), $dDLUO, $dDLC, $serial_to_check, GETPOSTINT($fk_commandefourndet), $notrigger);
 					if ($result < 0) {
 						setEventMessages($object->error, $object->errors, 'errors');
 						$error++;
