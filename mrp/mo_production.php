@@ -140,6 +140,18 @@ if (empty($reshook)) {
 			$action = '';
 			setEventMessages($object->error, $object->errors, 'errors');
 		}
+	} elseif ($action == 'confirm_cancel_no_stock_movement' && $confirm == 'yes' && !empty($permissiontoadd)) {
+		// For this new cancel type, we explicitly do not cancel consumed/produced lines from stock.
+		// The second parameter to $object->cancel() (also_cancel_consumed_and_produced_lines) is false by default if not passed,
+		// but we pass true for the new third parameter $skip_stock_movement.
+		$result = $object->cancel($user, 0, false, true);
+		if ($result > 0) {
+			header("Location: " . DOL_URL_ROOT.'/mrp/mo_card.php?id=' . $object->id);
+			exit;
+		} else {
+			$action = ''; // Reset action to show errors on the current page
+			setEventMessages($object->error, $object->errors, 'errors');
+		}
 	} elseif ($action == 'confirm_delete' && $confirm == 'yes' && !empty($permissiontodelete)) {
 		$also_cancel_consumed_and_produced_lines = (GETPOST('alsoCancelConsumedAndProducedLines', 'alpha') ? 1 : 0);
 		$result = $object->delete($user, 0, $also_cancel_consumed_and_produced_lines);
@@ -150,7 +162,69 @@ if (empty($reshook)) {
 			$action = '';
 			setEventMessages($object->error, $object->errors, 'errors');
 		}
+	} elseif ($action == 'confirm_return_materials' && $confirm == 'yes' && !empty($permissiontoadd)) {
+		$db->begin();
+		$error = 0;
+
+		// Fetch original 'toconsume' lines to identify what *should* have been consumed.
+		// Note: This logic assumes we are returning materials that were planned for consumption.
+		// A more complex scenario would be to find actual 'consumed' lines if they were not deleted
+		// by the cancel_no_stock_movement action (which they shouldn't be by design).
+		// For now, we use the Mo->cancelConsumedAndProducedLines logic as a template,
+		// but only for the 'consumed' part and ensuring it does 'reception' for them.
+
+		// Re-fetch the object to ensure its lines are current, especially 'toconsume' lines.
+		$object->fetch($id);
+		$object->fetchLines(); // Ensure lines are loaded.
+
+		$stockmove = new MouvementStock($db);
+		$stockmove->setOrigin('mo_manual_return', $object->id); // Custom origin type for tracking
+
+		// We need to identify what was actually consumed.
+		// The easiest way is to look for 'consumed' lines that might still be there if a previous cancellation failed
+		// or if this MO was in progress.
+		// However, the most robust way for *this specific feature* (post STATUS_CANCELLED_NO_STOCK_MOVEMENT)
+		// is to revert based on what *was* consumed.
+		// The original $object->cancelConsumedAndProducedLines() is designed to do this.
+		// We can call it here, but ensure it only affects consumed lines and deletes them.
+		// The `cancelConsumedAndProducedLines` method in `mo.class.php` already handles
+		// the stock reversal (reception for consumed items).
+		// Parameters: $user, $mode (0=all, 1=consumed, 2=produced), $also_delete_lines
+		// We want to reverse consumed items and delete the 'consumed' lines.
+		$result_stock_return = $object->cancelConsumedAndProducedLines($user, 1, true, $notrigger);
+
+		if ($result_stock_return < 0) {
+			$error++;
+			// Errors are already set by cancelConsumedAndProducedLines
+		}
+
+		if ($error) {
+			$db->rollback();
+			$action = 'return_materials'; // Stay on the confirmation step or go back to card with error
+			// setEventMessages already called by cancelConsumedAndProducedLines
+		} else {
+			$db->commit();
+			// Add a specific success message
+			setEventMessages($langs->trans("MaterialsReturnedSuccessfully"), null, 'mesgs');
+
+			// After successful return, change status to regular "Cancelled"
+			$result_status_change = $object->setStatusCommon($user, Mo::STATUS_CANCELED, $notrigger, 'MRP_MO_CANCEL'); // Using existing cancel trigger
+			if ($result_status_change < 0) {
+				$error++; // Log or handle this error if needed, though unlikely after successful stock return
+				setEventMessages($object->error, $object->errors, 'errors'); // Show error from setStatusCommon
+			}
+
+			if ($error) { // Check error again in case setStatusCommon failed
+				$db->rollback(); // Rollback if status change failed
+				$action = 'return_materials';
+			} else {
+				$db->commit();
+				header("Location: " . DOL_URL_ROOT.'/mrp/mo_card.php?id=' . $object->id);
+				exit;
+			}
+		}
 	}
+
 
 	// Actions cancel, add, update, delete or clone
 	include DOL_DOCUMENT_ROOT.'/core/actions_addupdatedelete.inc.php';
@@ -1002,6 +1076,24 @@ if ($object->id > 0 && (empty($action) || ($action != 'edit' && $action != 'crea
 		$formconfirm = $form->formconfirm($_SERVER["PHP_SELF"] . '?id=' . $object->id, $langs->trans('CancelMo'), $langs->trans('ConfirmCancelMo'), 'confirm_cancel', $formquestion, 0, 1);
 	}
 
+	// Confirmation to cancel without stock movement
+	if ($action == 'cancel_no_stock_movement') {
+		// No specific questions needed for this type of cancel, but formconfirm expects $formquestion to be an array.
+		$formquestion = array(
+			// Optionally, add a hidden field or a specific message if needed.
+			// For now, an empty array is fine as we don't ask for sub-line cancellation.
+		);
+		$formconfirm = $form->formconfirm($_SERVER["PHP_SELF"] . '?id=' . $object->id, $langs->trans('CancelMoNoStockMovement'), $langs->trans('ConfirmCancelMoNoStockMovement'), 'confirm_cancel_no_stock_movement', $formquestion, 0, 1);
+	}
+
+	// Confirmation for returning materials
+	if ($action == 'return_materials') {
+		$formquestion = array(
+			// No specific questions needed for this action, but formconfirm expects $formquestion to be an array.
+		);
+		$formconfirm = $form->formconfirm($_SERVER["PHP_SELF"] . '?id=' . $object->id, $langs->trans('ReturnMaterialsToInventory'), $langs->trans('ConfirmReturnMaterialsToInventory'), 'confirm_return_materials', $formquestion, 0, 1);
+	}
+
 	// Call Hook formConfirm
 	$parameters = array('formConfirm' => $formconfirm, 'lineid' => $lineid);
 	$reshook = $hookmanager->executeHooks('formConfirm', $parameters, $object, $action); // Note that $action and $object may have been modified by hook
@@ -1142,10 +1234,13 @@ if ($object->id > 0 && (empty($action) || ($action != 'edit' && $action != 'crea
 						print '<a class="butActionRefused" href="#" title="'.$langs->trans("GoOnTabProductionToProduceFirst", $langs->transnoentitiesnoconv("Production")).'">'.$langs->trans("Close").'</a>'."\n";
 					}
 
-					print '<a class="butActionDelete" href="'.$_SERVER["PHP_SELF"].'?id='.$object->id.'&action=cancel&token='.$newToken.'">'.$langs->trans("Cancel").'</a>'."\n";
+					if ($user->admin) {
+						print '<a class="butActionDelete" href="'.$_SERVER["PHP_SELF"].'?id='.$object->id.'&action=cancel&token='.$newToken.'">'.$langs->trans("Cancel").'</a>'."\n";
+					}
+					print '<a class="butActionDelete" href="'.$_SERVER["PHP_SELF"].'?id='.$object->id.'&action=cancel_no_stock_movement&token='.$newToken.'">'.$langs->trans("CancelNoStockMovement").'</a>'."\n";
 				}
 
-				if ($object->status == $object::STATUS_CANCELED) {
+				if ($object->status == $object::STATUS_CANCELED || $object->status == $object::STATUS_CANCELLED_NO_STOCK_MOVEMENT) {
 					print '<a class="butAction" href="'.$_SERVER["PHP_SELF"].'?id='.$object->id.'&action=confirm_reopen&confirm=yes&token='.$newToken.'">'.$langs->trans("ReOpen").'</a>'."\n";
 				}
 
@@ -1158,12 +1253,42 @@ if ($object->id > 0 && (empty($action) || ($action != 'edit' && $action != 'crea
 }
 
 			}
+
+			// Button to manually return materials for STATUS_CANCELLED_NO_STOCK_MOVEMENT
+			if ($object->status == Mo::STATUS_CANCELLED_NO_STOCK_MOVEMENT && $permissiontoadd) {
+				// Check if there are 'toconsume' lines that had actual 'consumed' lines associated before cancellation,
+				// or if there are still 'consumed' lines (which shouldn't be the case if cancel_no_stock_movement worked as intended for future uses).
+				// For now, we'll assume if it's in this status, the button is relevant.
+				// A more precise check would involve seeing if there *were* consumptions to reverse.
+				// We also need to ensure this button is not shown if materials have already been returned by this manual action.
+				// This might require an additional flag on the MO or checking if related stock movements (manual return type) exist.
+
+				// Simple check: if any 'toconsume' lines exist, offer to return.
+				// A better check: see if any 'consumed' lines *ever* existed for this MO. This requires deeper log/history checking or a flag.
+				// Let's assume for now, if it's in this state, the user might want to click it.
+				// We'll add a check later if stock movements for return already exist.
+				$sqlCheckReturnMovements = "SELECT COUNT(rowid) as nb FROM ".MAIN_DB_PREFIX."stock_mouvement WHERE origintype = 'mo_manual_return' AND fk_origin = ".((int)$object->id);
+				$resqlCheck = $db->query($sqlCheckReturnMovements);
+				$manualReturnDone = 0;
+				if ($resqlCheck) {
+					$objCheck = $db->fetch_object($resqlCheck);
+					if ($objCheck && $objCheck->nb > 0) {
+						$manualReturnDone = 1;
+					}
+				}
+
+				if (!$manualReturnDone) {
+					print '<a class="butAction" href="'.$_SERVER["PHP_SELF"].'?id='.$object->id.'&action=return_materials&token='.$newToken.'">'.$langs->trans("ReturnMaterialsToInventory").'</a>';
+				} else {
+					print '<a class="butActionRefused classfortooltip" href="#" title="'.$langs->trans("MaterialsAlreadyReturned").'">'.$langs->trans("ReturnMaterialsToInventory").'</a>';
+				}
+			}
 		}
 
 		print '</div>';
 	}
 
-	if (in_array($action, array('consumeorproduce', 'consumeandproduceall', 'addconsumeline', 'addproduceline', 'editline'))) {
+	if (in_array($action, array('consumeorproduce', 'consumeandproduceall', 'addconsumeline', 'addproduceline', 'editline', 'return_materials'))) {
 		print '<form method="POST" action="'.$_SERVER["PHP_SELF"].'">';
 		print '<input type="hidden" name="token" value="'.newToken().'">';
 		print '<input type="hidden" name="action" value="confirm_'.$action.'">';

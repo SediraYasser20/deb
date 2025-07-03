@@ -53,6 +53,7 @@ class Mo extends CommonObject
 	const STATUS_INPROGRESS = 2;
 	const STATUS_PRODUCED = 3;
 	const STATUS_CANCELED = 9;
+	const STATUS_CANCELLED_NO_STOCK_MOVEMENT = 10;
 
 
 	/**
@@ -107,7 +108,7 @@ class Mo extends CommonObject
 		'date_end_planned' => array('type' => 'datetime', 'label' => 'DateEndPlannedMo', 'enabled' => 1, 'visible' => 1, 'position' => 56, 'notnull' => -1, 'index' => 1, 'alwayseditable' => 1, 'csslist' => 'nowraponall'),
 		'import_key' => array('type' => 'varchar(14)', 'label' => 'ImportId', 'enabled' => 1, 'visible' => -2, 'position' => 1000, 'notnull' => -1,),
 		'model_pdf' => array('type' => 'varchar(255)', 'label' => 'Model pdf', 'enabled' => 1, 'visible' => 0, 'position' => 1010),
-		'status' => array('type' => 'integer', 'label' => 'Status', 'enabled' => 1, 'visible' => 2, 'position' => 1000, 'default' => '0', 'notnull' => 1, 'index' => 1, 'arrayofkeyval' => array('0' => 'Draft', '1' => 'Validated', '2' => 'InProgress', '3' => 'StatusMOProduced', '9' => 'Canceled')),
+		'status' => array('type' => 'integer', 'label' => 'Status', 'enabled' => 1, 'visible' => 2, 'position' => 1000, 'default' => '0', 'notnull' => 1, 'index' => 1, 'arrayofkeyval' => array('0' => 'Draft', '1' => 'Validated', '2' => 'InProgress', '3' => 'StatusMOProduced', '9' => 'Canceled', '10' => 'CancelledNoStockMovement')),
 		'fk_parent_line' => array('type' => 'integer:MoLine:mrp/class/mo.class.php', 'label' => 'ParentMo', 'enabled' => 1, 'visible' => 0, 'position' => 1020, 'default' => '0', 'notnull' => 0, 'index' => 1,'showoncombobox' => 0),
 	);
 	/**
@@ -1336,9 +1337,10 @@ public function createProduction(User $user, $notrigger = 0)
 	 *	@param	User	$user										Object user that modify
 	 *  @param	int		$notrigger									1=Does not execute triggers, 0=Execute triggers
 	 *  @param	bool	$also_cancel_consumed_and_produced_lines  	true if the consumed and produced lines will be deleted (and stocks incremented/decremented back) (false by default)
+	 *	@param	bool	$skip_stock_movement						If true, sets to STATUS_CANCELLED_NO_STOCK_MOVEMENT and skips stock reversal.
 	 *	@return	int													Return integer <0 if KO, 0=Nothing done, >0 if OK
 	 */
-	public function cancel($user, $notrigger = 0, $also_cancel_consumed_and_produced_lines = false)
+	public function cancel($user, $notrigger = 0, $also_cancel_consumed_and_produced_lines = false, $skip_stock_movement = false)
 	{
 		// Protection
 		if ($this->status != self::STATUS_VALIDATED && $this->status != self::STATUS_INPROGRESS) {
@@ -1355,17 +1357,26 @@ public function createProduction(User $user, $notrigger = 0)
 		$error = 0;
 		$this->db->begin();
 
-		if ($also_cancel_consumed_and_produced_lines) {
-			$result = $this->cancelConsumedAndProducedLines($user, 0, true, $notrigger);
+		if ($skip_stock_movement) {
+			// Set to new status and do not touch stock lines
+			$result = $this->setStatusCommon($user, self::STATUS_CANCELLED_NO_STOCK_MOVEMENT, $notrigger, 'MRP_MO_CANCEL_NO_STOCK'); // Consider a new trigger if needed
 			if ($result < 0) {
 				$error++;
 			}
-		}
+		} else {
+			// Original behavior
+			if ($also_cancel_consumed_and_produced_lines) {
+				$result = $this->cancelConsumedAndProducedLines($user, 0, true, $notrigger);
+				if ($result < 0) {
+					$error++;
+				}
+			}
 
-		if (!$error) {
-			$result = $this->setStatusCommon($user, self::STATUS_CANCELED, $notrigger, 'MRP_MO_CANCEL');
-			if ($result < 0) {
-				$error++;
+			if (!$error) {
+				$result = $this->setStatusCommon($user, self::STATUS_CANCELED, $notrigger, 'MRP_MO_CANCEL');
+				if ($result < 0) {
+					$error++;
+				}
 			}
 		}
 
@@ -1388,7 +1399,7 @@ public function createProduction(User $user, $notrigger = 0)
 	public function reopen($user, $notrigger = 0)
 	{
 		// Protection
-		if ($this->status != self::STATUS_PRODUCED && $this->status != self::STATUS_CANCELED) {
+		if ($this->status != self::STATUS_PRODUCED && $this->status != self::STATUS_CANCELED && $this->status != self::STATUS_CANCELLED_NO_STOCK_MOVEMENT) {
 			return 0;
 		}
 
@@ -1675,12 +1686,14 @@ public function createProduction(User $user, $notrigger = 0)
 			$this->labelStatus[self::STATUS_INPROGRESS] = $langs->transnoentitiesnoconv('InProgress');
 			$this->labelStatus[self::STATUS_PRODUCED] = $langs->transnoentitiesnoconv('StatusMOProduced');
 			$this->labelStatus[self::STATUS_CANCELED] = $langs->transnoentitiesnoconv('Canceled');
+			$this->labelStatus[self::STATUS_CANCELLED_NO_STOCK_MOVEMENT] = $langs->transnoentitiesnoconv('CancelledNoStockMovement');
 
 			$this->labelStatusShort[self::STATUS_DRAFT] = $langs->transnoentitiesnoconv('Draft');
 			$this->labelStatusShort[self::STATUS_VALIDATED] = $langs->transnoentitiesnoconv('Validated');
 			$this->labelStatusShort[self::STATUS_INPROGRESS] = $langs->transnoentitiesnoconv('InProgress');
 			$this->labelStatusShort[self::STATUS_PRODUCED] = $langs->transnoentitiesnoconv('StatusMOProduced');
 			$this->labelStatusShort[self::STATUS_CANCELED] = $langs->transnoentitiesnoconv('Canceled');
+			$this->labelStatusShort[self::STATUS_CANCELLED_NO_STOCK_MOVEMENT] = $langs->transnoentitiesnoconv('CancelledNoStockMovementShort');
 		}
 
 		$statusType = 'status'.$status;
@@ -1695,6 +1708,9 @@ public function createProduction(User $user, $notrigger = 0)
 		}
 		if ($status == self::STATUS_CANCELED) {
 			$statusType = 'status9';
+		}
+		if ($status == self::STATUS_CANCELLED_NO_STOCK_MOVEMENT) {
+			$statusType = 'status9'; // Using same style as regular cancel for now
 		}
 
 		return dolGetStatus($this->labelStatus[$status], $this->labelStatusShort[$status], '', $statusType, $mode);
