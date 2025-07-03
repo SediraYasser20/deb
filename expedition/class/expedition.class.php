@@ -1423,6 +1423,10 @@ class Expedition extends CommonObject
 									$origin_object->setStatut(Commande::STATUS_VALIDATED);
 								}
 							}
+							// Update order status based on remaining shipments/invoices
+							if (is_object($origin_object) && method_exists($origin_object, 'update_status_after_element_deletion')) {
+								$origin_object->update_status_after_element_deletion('shipment');
+							}
 						}
 
 						if (!$error) {
@@ -1625,6 +1629,10 @@ class Expedition extends CommonObject
 								if (count($origin_object->expeditions) <= 0) {
 									$origin_object->setStatut(Commande::STATUS_VALIDATED);
 								}
+							}
+							// Update order status based on remaining shipments/invoices
+							if (is_object($origin_object) && method_exists($origin_object, 'update_status_after_element_deletion')) {
+								$origin_object->update_status_after_element_deletion('shipment');
 							}
 						}
 

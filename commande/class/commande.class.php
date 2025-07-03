@@ -4269,4 +4269,148 @@ class Commande extends CommonOrder
 	{
 		return $this->setSignedStatusCommon($user, $status, $notrigger, $triggercode);
 	}
+
+	/**
+	 * Update the order status after a linked element (shipment or invoice) is deleted.
+	 *
+	 * @param  string $element_type Type of the element deleted ('shipment' or 'invoice').
+	 * @return int                1 if status was changed, 0 if no change was needed, <0 on error.
+	 */
+	public function update_status_after_element_deletion($element_type)
+	{
+		global $langs;
+
+		$this->db->begin();
+		$changed = 0;
+		$error = 0;
+
+		$initial_billed_status = $this->billed;
+		$initial_fk_statut = $this->status; // Current status of the order
+
+		if ($element_type == 'shipment') {
+			// Count active (validated or in progress) shipments for this order.
+			$sql_check_shipments = "SELECT COUNT(DISTINCT e.rowid) as nb";
+			$sql_check_shipments .= " FROM ".MAIN_DB_PREFIX."expedition as e";
+			$sql_check_shipments .= " JOIN ".MAIN_DB_PREFIX."element_element as el ON el.fk_target = e.rowid AND el.targettype = 'shipping'";
+			$sql_check_shipments .= " WHERE el.fk_source = ". (int) $this->id ." AND el.sourcetype = 'commande'";
+			$sql_check_shipments .= " AND e.fk_statut IN (".Expedition::STATUS_VALIDATED.", ".Expedition::STATUS_SHIPMENT_IN_PROGRESS.")";
+
+			$remaining_shipments = 0;
+			$resql_check_shipments = $this->db->query($sql_check_shipments);
+			if ($resql_check_shipments) {
+				$obj_check_shipments = $this->db->fetch_object($resql_check_shipments);
+				$remaining_shipments = $obj_check_shipments->nb;
+			} else {
+				$this->error = $this->db->lasterror();
+				$this->db->rollback();
+				return -1; // Error querying shipments
+			}
+
+			if ($remaining_shipments == 0) {
+				if ($this->status == self::STATUS_CLOSED || $this->status == self::STATUS_SHIPMENTONPROCESS) {
+					dol_syslog("Order ref ".$this->ref.": No active shipments remaining. Reverting status from ".$this->status." to ".self::STATUS_VALIDATED);
+					$this->statut = self::STATUS_VALIDATED; // deprecated
+					$this->status = self::STATUS_VALIDATED;
+
+					$sql_update = "UPDATE ".MAIN_DB_PREFIX.$this->table_element;
+					$sql_update .= " SET fk_statut = ".self::STATUS_VALIDATED;
+					$sql_update .= " WHERE rowid = ".((int) $this->id);
+
+					if (!$this->db->query($sql_update)) {
+						$this->error = $this->db->lasterror();
+						$this->db->rollback();
+						return -2; // Error updating order status
+					}
+					// $changed will be set later by comparing initial and final states
+				}
+			}
+		} elseif ($element_type == 'invoice') {
+			// Check and set billed = 0 if it was the last invoice
+			$nb_invoices = 0;
+			// Ensure fresh load of linked invoices' statuses
+			$this->fetchObjectLinked(null, 'facture', $this->id, 'commande', 'source', 1);
+			if (isset($this->linkedObjects['facture']) && is_array($this->linkedObjects['facture'])) {
+				foreach ($this->linkedObjects['facture'] as $invoice_id_or_obj) {
+					$invoice_id_to_check = is_object($invoice_id_or_obj) ? $invoice_id_or_obj->id : $invoice_id_or_obj;
+					$tempInvoice = new Facture($this->db);
+					if ($tempInvoice->fetch($invoice_id_to_check) > 0) {
+						if ($tempInvoice->status == Facture::STATUS_VALIDATED || $tempInvoice->status == Facture::STATUS_CLOSED) {
+							$nb_invoices++;
+						}
+					}
+				}
+			}
+
+			if ($nb_invoices == 0 && $this->billed == 1) {
+				dol_syslog("Order ref ".$this->ref.": No validated invoices remaining. Setting billed = 0");
+				$res_unbill = $this->classifyUnBilled($GLOBALS['user'], 1);
+				if ($res_unbill < 0) {
+					$this->db->rollback();
+					return -3; // Error in classifyUnBilled
+				}
+				// $this->billed is now 0, $changed will be set later
+			}
+
+			// After handling the billed flag, check if fk_statut needs adjustment based on shipments.
+			// This is crucial if deleting the last invoice should revert a DELIVERED order to VALIDATED if no shipments.
+			if ($this->billed == 0) { // Only consider changing fk_statut if the order is now not billed
+				$sql_check_shipments = "SELECT COUNT(DISTINCT e.rowid) as nb";
+				$sql_check_shipments .= " FROM ".MAIN_DB_PREFIX."expedition as e";
+				$sql_check_shipments .= " JOIN ".MAIN_DB_PREFIX."element_element as el ON el.fk_target = e.rowid AND el.targettype = 'shipping'";
+				$sql_check_shipments .= " WHERE el.fk_source = ". (int) $this->id ." AND el.sourcetype = 'commande'";
+				$sql_check_shipments .= " AND e.fk_statut IN (".Expedition::STATUS_VALIDATED.", ".Expedition::STATUS_SHIPMENT_IN_PROGRESS.")";
+
+				$remaining_shipments = 0;
+				$resql_check_shipments = $this->db->query($sql_check_shipments);
+				if ($resql_check_shipments) {
+					$obj_check_shipments = $this->db->fetch_object($resql_check_shipments);
+					$remaining_shipments = $obj_check_shipments->nb;
+				} else {
+					$this->error = $this->db->lasterror();
+					$this->db->rollback();
+					return -4; // Error querying shipments
+				}
+
+				if ($remaining_shipments == 0) {
+					if ($this->status == self::STATUS_CLOSED || $this->status == self::STATUS_SHIPMENTONPROCESS) {
+						dol_syslog("Order ref ".$this->ref.": Last invoice deleted AND no active shipments. Reverting order status to VALIDATED.");
+						$this->statut = self::STATUS_VALIDATED;
+						$this->status = self::STATUS_VALIDATED;
+
+						$sql_update_status = "UPDATE ".MAIN_DB_PREFIX.$this->table_element;
+						$sql_update_status .= " SET fk_statut = ".self::STATUS_VALIDATED;
+						$sql_update_status .= " WHERE rowid = ".((int) $this->id);
+
+						if (!$this->db->query($sql_update_status)) {
+							$this->error = $this->db->lasterror();
+							$this->db->rollback();
+							return -5; // Error updating order status
+						}
+					}
+				}
+			}
+		}
+
+		// Determine if anything actually changed to set the $changed flag for the trigger
+		if (($this->billed != $initial_billed_status) || ($this->status != $initial_fk_statut)) {
+			$changed = 1;
+		}
+
+		if ($changed && !$error) {
+			// Call trigger if something changed
+			$result_trigger = $this->call_trigger('ORDER_MODIFY', $GLOBALS['user']);
+			if ($result_trigger < 0) {
+				$error++;
+				$this->error = "Failed to execute trigger ORDER_MODIFY after element deletion.";
+			}
+		}
+
+		if ($error) {
+			$this->db->rollback();
+			return -10 - $error;
+		} else {
+			$this->db->commit();
+			return $changed;
+		}
+	}
 }

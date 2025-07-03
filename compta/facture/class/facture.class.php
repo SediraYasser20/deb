@@ -2972,6 +2972,29 @@ class Facture extends CommonInvoice
 					}
 
 					$this->db->commit();
+
+					// After successful deletion, update the source order's status
+					if (!$error) {
+						// Fetch linked orders
+						$this->fetchObjectLinked(null, 'commande', $this->id, 'facture', 'target');
+						if (isset($this->linkedObjects['commande']) && is_array($this->linkedObjects['commande'])) {
+							foreach ($this->linkedObjects['commande'] as $order_ref => $order_obj) {
+								if (is_object($order_obj) && method_exists($order_obj, 'update_status_after_element_deletion')) {
+									dol_syslog("Calling update_status_after_element_deletion for order ID " . $order_obj->id . " after deleting invoice ID " . $this->id, LOG_DEBUG);
+									$order_obj->update_status_after_element_deletion('invoice');
+								} elseif (is_numeric($order_ref)) { // If it's just an ID
+									$tmpOrder = new Commande($this->db);
+									if ($tmpOrder->fetch($order_ref) > 0) {
+										if (method_exists($tmpOrder, 'update_status_after_element_deletion')) {
+											dol_syslog("Calling update_status_after_element_deletion for order ID " . $tmpOrder->id . " after deleting invoice ID " . $this->id, LOG_DEBUG);
+											$tmpOrder->update_status_after_element_deletion('invoice');
+										}
+									}
+								}
+							}
+						}
+					}
+
 					return 1;
 				} else {
 					$this->error = $this->db->lasterror()." sql=".$sql;
